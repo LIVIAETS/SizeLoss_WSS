@@ -9,6 +9,11 @@ import numpy as np
 class Partial_CE(torch.autograd.Function):
     def forward(self, input, target, weakLabels):
         self.save_for_backward(input, target, weakLabels)
+        # b, c, w, h = input.shape
+        # assert target.shape == input.shape
+        # assert weakLabels.shape == (b, 1, w, h)
+
+        # assert np.allclose(input[:, 0, ...].cpu().numpy(), 1 - input[:, 1, ...].cpu().numpy(), atol=1e-2)
 
         eps = 1e-20
 
@@ -24,8 +29,6 @@ class Partial_CE(torch.autograd.Function):
 
         lossT = torch.FloatTensor(1)
         lossT.fill_(np.float32(loss).item())
-
-        lossT = lossT.cuda()
 
         return lossT.cuda()   # a single number (averaged loss over batch samples)
 

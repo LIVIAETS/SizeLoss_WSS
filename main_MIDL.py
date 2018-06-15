@@ -4,13 +4,12 @@ import os
 
 import torch
 import numpy as np
-import medicalDataLoader
 from torch import nn
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-
+import medicalDataLoader
 from ENet import ENet
 from utils import to_var
 from utils import computeDiceOneHotBinary, predToSegmentation, inference, DicesToDice, printProgressBar

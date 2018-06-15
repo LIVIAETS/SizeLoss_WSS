@@ -28,7 +28,7 @@ def make_dataset(root, mode):
         labels.sort()
         labels_weak.sort()
 
-        for it_im, it_gt, it_w in zip(images, labels,labels_weak):
+        for it_im, it_gt, it_w in zip(images, labels, labels_weak):
             item = (os.path.join(train_img_path, it_im), os.path.join(train_mask_path, it_gt), os.path.join(train_mask_weak_path, it_w))
             items.append(item)
 
@@ -45,7 +45,7 @@ def make_dataset(root, mode):
         labels.sort()
         labels_weak.sort()
 
-        for it_im, it_gt, it_w in zip(images, labels,labels_weak):
+        for it_im, it_gt, it_w in zip(images, labels, labels_weak):
             item = (os.path.join(train_img_path, it_im), os.path.join(train_mask_path, it_gt), os.path.join(train_mask_weak_path, it_w))
             items.append(item)
     else:
