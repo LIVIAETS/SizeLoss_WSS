@@ -1,5 +1,5 @@
 # Constrained-CNN losses for weakly supervised segmentation
-Code of our submission https://openreview.net/forum?id=BkIBHb2sG at MIDL 2018
+Code of our submission https://openreview.net/forum?id=BkIBHb2sG at MIDL 2018. Video of the talk is available: https://www.youtube.com/watch?v=2-0Ey5-If7o 
 
 To run it, simply run `main_MIDL.py` (python3.6+, the requirements are specified in the `requirements.txt` file).
 
