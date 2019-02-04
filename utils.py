@@ -1,229 +1,304 @@
 #!/usr/bin/env python3.6
 
-import os
+from random import random
 from pathlib import Path
+from multiprocessing.pool import Pool
+
+from typing import Any, Callable, Iterable, List, Set, Tuple, TypeVar, Union
 
 import torch
 import numpy as np
-import torchvision
-import torch.nn as nn
-from torch.autograd import Variable
+import scipy as sp
+import scipy.ndimage
+from tqdm import tqdm
+from torch import einsum
+from torch import Tensor
+from functools import partial
+from skimage.io import imsave
+from PIL import Image, ImageOps
+from scipy.ndimage import distance_transform_edt as distance
+from scipy.spatial.distance import directed_hausdorff
 
 
-def to_var(x):
-    if torch.cuda.is_available():
-        x = x.cuda()
-    return Variable(x)
+colors = ["c", "r", "g", "b", "m", 'y', 'k', 'chartreuse', 'coral', 'gold', 'lavender',
+          'silver', 'tan', 'teal', 'wheat']
+
+# functions redefinitions
+tqdm_ = partial(tqdm, ncols=175,
+                leave=False,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [' '{rate_fmt}{postfix}]')
+
+A = TypeVar("A")
+B = TypeVar("B")
+T = TypeVar("T", Tensor, np.ndarray)
 
 
-def printProgressBar(iteration, total, prefix='', suffix='', decimals=1, length=100,
-                     fill='=', empty=' ', tip='>', begin='[', end=']', done="[DONE]", clear=True):
+def map_(fn: Callable[[A], B], iter: Iterable[A]) -> List[B]:
+    return list(map(fn, iter))
+
+
+def mmap_(fn: Callable[[A], B], iter: Iterable[A]) -> List[B]:
+    return Pool().map(fn, iter)
+
+
+def uc_(fn: Callable) -> Callable:
+    return partial(uncurry, fn)
+
+
+def uncurry(fn: Callable, args: List[Any]) -> Any:
+    return fn(*args)
+
+
+def id_(x):
+    return x
+
+
+def flatten_(to_flat: Iterable[Iterable[A]]) -> List[A]:
+    return [e for l in to_flat for e in l]
+
+
+def depth(e: List) -> int:
     """
-    Print iterations progress.
-    Call in a loop to create terminal progress bar
-    @params:
-        iteration   - Required : current iteration                          [int]
-        total       - Required : total iterations                           [int]
-        prefix      - Optional : prefix string                              [str]
-        suffix      - Optional : suffix string                              [str]
-        decimals    - Optional : positive number of decimals in percent     [int]
-        length      - Optional : character length of bar                    [int]
-        fill        - Optional : bar fill character                         [str] (ex: 'â– ', 'â–ˆ', '#', '=')
-        empty       - Optional : not filled bar character                   [str] (ex: '-', ' ', 'â€¢')
-        tip         - Optional : character at the end of the fill bar       [str] (ex: '>', '')
-        begin       - Optional : starting bar character                     [str] (ex: '|', 'â–•', '[')
-        end         - Optional : ending bar character                       [str] (ex: '|', 'â–', ']')
-        done        - Optional : display message when 100% is reached       [str] (ex: "[DONE]")
-        clear       - Optional : display completion message or leave as is  [str]
+    Compute the depth of nested lists
     """
-    percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
-    filledLength = int(length * iteration // total)
-    bar = fill * filledLength
-    if iteration != total:
-        bar = bar + tip
-    bar = bar + empty * (length - filledLength - len(tip))
-    display = '\r{prefix}{begin}{bar}{end} {percent}%{suffix}' \
-              .format(prefix=prefix, begin=begin, bar=bar, end=end, percent=percent, suffix=suffix)
-    print(display, end=''),   # comma after print() required for python 2
-    if iteration == total:      # print with newline on complete
-        if clear:               # display given complete message with spaces to 'erase' previous progress bar
-            finish = '\r{prefix}{done}'.format(prefix=prefix, done=done)
-            if hasattr(str, 'decode'):   # handle python 2 non-unicode strings for proper length measure
-                finish = finish.decode('utf-8')
-                display = display.decode('utf-8')
-            clear = ' ' * max(len(display) - len(finish), 0)
-            print(finish + clear)
-        else:
-            print('')
+    if type(e) == list and e:
+        return 1 + depth(e[0])
+
+    return 0
 
 
-class computeDiceOneHotBinary(nn.Module):
-    def __init__(self):
-        super(computeDiceOneHotBinary, self).__init__()
-
-    def dice(self, input, target):
-        inter = (input * target).float().sum()
-        sum = input.sum() + target.sum()
-        if (sum == 0).all():
-            return (2 * inter + 1e-8) / (sum + 1e-8)
-
-        return 2 * (input * target).float().sum() / (input.sum() + target.sum())
-
-    def inter(self, input, target):
-        return (input * target).float().sum()
-
-    def sum(self, input, target):
-        return input.sum() + target.sum()
-
-    def forward(self, pred, GT):
-        # GT is 4x320x320 of 0 and 1
-        # pred is converted to 0 and 1
-        batchsize = GT.size(0)
-        DiceN = to_var(torch.zeros(batchsize, 2))
-        DiceB = to_var(torch.zeros(batchsize, 2))
-
-        for i in range(batchsize):
-            DiceN[i, 0] = self.inter(pred[i, 0], GT[i, 0])
-            DiceB[i, 0] = self.inter(pred[i, 1], GT[i, 1])
-
-            DiceN[i, 1] = self.sum(pred[i, 0], GT[i, 0])
-            DiceB[i, 1] = self.sum(pred[i, 1], GT[i, 1])
-
-        return DiceN, DiceB
+# fns
+def soft_size(a: Tensor) -> Tensor:
+    return torch.einsum("bcwh->bc", a)[..., None]
 
 
-def DicesToDice(Dices):
-    # print('dtd')
-    # print(Dices.data.cpu().numpy())
-    sums = Dices.sum(dim=0)
-    # print(sums.data.cpu().numpy())
-    return (2 * sums[0] + 1e-8) / (sums[1] + 1e-8)
+def batch_soft_size(a: Tensor) -> Tensor:
+    return torch.einsum("bcwh->c", a)[..., None]
 
 
-def getSingleImageBin(pred):
-    # input is a 4-channels image corresponding to the predictions of the net
-    # output is a gray level image (1 channel) of the segmentation with "discrete" values
-    Val = to_var(torch.zeros(2))
-    Val[1] = 1.0
+def soft_centroid(a: Tensor) -> Tensor:
+    b, c, w, h = a.shape
 
-    x = predToSegmentation(pred)
+    ws, hs = map_(lambda e: Tensor(e).to(a.device).type(torch.float32), np.mgrid[0:w, 0:h])
+    assert ws.shape == hs.shape == (w, h)
 
-    out = x * Val.view(1, 2, 1, 1)
-    return out.sum(dim=1, keepdim=True)
+    flotted = a.type(torch.float32)
+    tot = einsum("bcwh->bc", a).type(torch.float32) + 1e-10
 
+    cw = einsum("bcwh,wh->bc", flotted, ws) / tot
+    ch = einsum("bcwh,wh->bc", flotted, hs) / tot
 
-def predToSegmentation(pred):
-    Max = pred.max(dim=1, keepdim=True)[0]
-    x = pred / Max
-    return (x == 1).float()
+    res = torch.stack([cw, ch], dim=2)
+    assert res.shape == (b, c, 2)
 
-
-def getOneHotSegmentation_Bin(batch):
-    backgroundVal = 0
-    label1 = 1.0
-
-    oneHotLabels = torch.cat((batch == backgroundVal, batch == label1),  dim=1)
-    return oneHotLabels.float()
+    return res
 
 
-def inference(net, temperature, img_batch, batch_size, epoch, deepSupervision, modelName, minSize, maxSize):
-    # directory = 'Results/ImagesViolationConstraint/NIPS/' + modelName + '/Epoch_' + str(epoch)
-    directory = str(Path("Results", "ImagesViolationConstraint", "MIDL", modelName, f"Epoch_{epoch}"))
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+# Assert utils
+def uniq(a: Tensor) -> Set:
+    return set(torch.unique(a.cpu()).numpy())
 
-    total = len(img_batch)
 
-    Dice1 = torch.zeros(total, 2)
+def sset(a: Tensor, sub: Iterable) -> bool:
+    return uniq(a).issubset(sub)
 
-    net.eval()
 
-    img_names_ALL = []
+def eq(a: Tensor, b) -> bool:
+    return torch.eq(a, b).all()
 
-    softMax = nn.Softmax()
-    softMax.cuda()
 
-    dice = computeDiceOneHotBinary().cuda()
+def simplex(t: Tensor, axis=1) -> bool:
+    _sum = t.sum(axis).type(torch.float32)
+    _ones = torch.ones_like(_sum, dtype=torch.float32)
+    return torch.allclose(_sum, _ones)
 
-    sizesGT = []
-    sizesPred = []
 
-    for i, data in enumerate(img_batch):
-        printProgressBar(i, total, prefix="[Inference] Getting segmentations...", length=30)
-        image, labels, labels_weak, img_names = data
-        img_names_ALL.append(img_names[0].split('/')[-1].split('.')[0])
+def one_hot(t: Tensor, axis=1) -> bool:
+    return simplex(t, axis) and sset(t, [0, 1])
 
-        MRI = to_var(image)
-        Segmentation = to_var(labels)
 
-        if not deepSupervision:
-            segmentation_prediction = net(MRI)
-        else:
-            segmentation_prediction, seg3, seg2, seg1 = net(MRI)
+# # Metrics and shitz
+def meta_dice(sum_str: str, label: Tensor, pred: Tensor, smooth: float = 1e-8) -> float:
+    assert label.shape == pred.shape
+    assert one_hot(label)
+    assert one_hot(pred)
 
-        Segmentation_planes = getOneHotSegmentation_Bin(Segmentation)
+    inter_size: Tensor = einsum(sum_str, [intersection(label, pred)]).type(torch.float32)
+    sum_sizes: Tensor = (einsum(sum_str, [label]) + einsum(sum_str, [pred])).type(torch.float32)
 
-        pred_y = softMax(segmentation_prediction/temperature)
+    dices: Tensor = (2 * inter_size + smooth) / (sum_sizes + smooth)
 
-        softmax_y = pred_y.cpu().data.numpy()
-        softB = softmax_y[:, 1, :, :]
+    return dices
 
-        # Hard-Size
-        pixelsClassB = np.where(softB > 0.5)
 
-        predLabTemp = np.zeros(softB.shape)
-        predLabTemp[pixelsClassB] = 1.0
-        sizePredNumpy = predLabTemp.sum()
-        # minSize = 97.9
-        # maxSize = 1722.6
+dice_coef = partial(meta_dice, "bcwh->bc")
+dice_batch = partial(meta_dice, "bcwh->c")  # used for 3d dice
 
-        idx = np.where(labels.numpy() == 1.0)
-        sizeLV_GT = len(idx[0])
-        sizesGT.append(sizeLV_GT)
-        sizesPred.append(sizePredNumpy)
 
-        if sizeLV_GT > 0:
-            if sizePredNumpy < minSize:
-                out = torch.cat((MRI, pred_y[:, 1, :, :].view(1, 1, 256, 256), Segmentation))
-                name2save = img_names[0].split('./ACDC-2D-All/val/Img/')
-                name2save = name2save[1].split('.png')
-                torchvision.utils.save_image(out.data, os.path.join(directory, name2save[0]+'_Lower_'+str(minSize-sizePredNumpy)+'.png'),
-                                             nrow=batch_size,
-                                             padding=2,
-                                             normalize=False,
-                                             range=None,
-                                             scale_each=False,
-                                             pad_value=0)
+def intersection(a: Tensor, b: Tensor) -> Tensor:
+    assert a.shape == b.shape
+    assert sset(a, [0, 1])
+    assert sset(b, [0, 1])
+    return a & b
 
-            if sizePredNumpy > maxSize:
-                out = torch.cat((MRI, pred_y[:, 1, :, :].view(1, 1, 256, 256), Segmentation))
-                name2save = img_names[0].split('./ACDC-2D-All/val/Img/')
-                name2save = name2save[1].split('.png')
-                torchvision.utils.save_image(out.data, os.path.join(directory, name2save[0]+'_Upper_'+str(sizePredNumpy-maxSize)+'.png'),
-                                             nrow=batch_size,
-                                             padding=2,
-                                             normalize=False,
-                                             range=None,
-                                             scale_each=False,
-                                             pad_value=0)
 
-        else:
-            if sizePredNumpy > 0:
-                out = torch.cat((MRI, pred_y[:, 1, :, :].view(1, 1, 256, 256), Segmentation))
-                name2save = img_names[0].split('./ACDC-2D-All/val/Img/')
-                name2save = name2save[1].split('.png')
-                torchvision.utils.save_image(out.data, os.path.join(directory, name2save[0]+'_'+str(sizePredNumpy)+'.png'),
-                                             nrow=batch_size,
-                                             padding=2,
-                                             normalize=False,
-                                             range=None,
-                                             scale_each=False,
-                                             pad_value=0)
+def union(a: Tensor, b: Tensor) -> Tensor:
+    assert a.shape == b.shape
+    assert sset(a, [0, 1])
+    assert sset(b, [0, 1])
+    return a | b
 
-        DicesN, Dices1 = dice(pred_y, Segmentation_planes)
-        Dice1[i] = Dices1.data
-    printProgressBar(total, total, done="[Inference] Segmentation Done !")
 
-    ValDice1 = DicesToDice(Dice1)
+def haussdorf(preds: Tensor, target: Tensor) -> Tensor:
+    assert preds.shape == target.shape
+    assert one_hot(preds)
+    assert one_hot(target)
 
-    return [ValDice1, sizesGT, sizesPred]
+    B, C, _, _ = preds.shape
+
+    res = torch.zeros((B, C), dtype=torch.float32, device=preds.device)
+    n_pred = preds.cpu().numpy()
+    n_target = target.cpu().numpy()
+
+    for b in range(B):
+        if C == 2:
+            res[b, :] = numpy_haussdorf(n_pred[b, 0], n_target[b, 0])
+            continue
+
+        for c in range(C):
+            res[b, c] = numpy_haussdorf(n_pred[b, c], n_target[b, c])
+
+    return res
+
+
+def numpy_haussdorf(pred: np.ndarray, target: np.ndarray) -> float:
+    assert len(pred.shape) == 2
+    assert pred.shape == target.shape
+
+    return max(directed_hausdorff(pred, target)[0], directed_hausdorff(target, pred)[0])
+
+
+# switch between representations
+def probs2class(probs: Tensor) -> Tensor:
+    b, _, w, h = probs.shape  # type: Tuple[int, int, int, int]
+    assert simplex(probs)
+
+    res = probs.argmax(dim=1)
+    assert res.shape == (b, w, h)
+
+    return res
+
+
+def class2one_hot(seg: Tensor, C: int) -> Tensor:
+    if len(seg.shape) == 2:  # Only w, h, used by the dataloader
+        seg = seg.unsqueeze(dim=0)
+    assert sset(seg, list(range(C)))
+
+    b, w, h = seg.shape  # type: Tuple[int, int, int]
+
+    res = torch.stack([seg == c for c in range(C)], dim=1).type(torch.int32)
+    assert res.shape == (b, C, w, h)
+    assert one_hot(res)
+
+    return res
+
+
+def probs2one_hot(probs: Tensor) -> Tensor:
+    _, C, _, _ = probs.shape
+    assert simplex(probs)
+
+    res = class2one_hot(probs2class(probs), C)
+    assert res.shape == probs.shape
+    assert one_hot(res)
+
+    return res
+
+
+def one_hot2dist(seg: np.ndarray) -> np.ndarray:
+    assert one_hot(torch.Tensor(seg), axis=0)
+    C: int = len(seg)
+
+    res = np.zeros_like(seg)
+    for c in range(C):
+        posmask = seg[c].astype(np.bool)
+
+        if posmask.any():
+            negmask = ~posmask
+            res[c] = distance(negmask) * negmask - (distance(posmask) - 1) * posmask
+        # The idea is to leave blank the negative classes
+        # since this is one-hot encoded, another class will supervise that pixel
+        # else:
+        #     padded = np.pad(~posmask, [[1, 1], [1, 1]], mode='constant', constant_values=[[0, 0], [0, 0]])
+        #     res[c] = distance(padded)[1:-1, 1:-1]
+
+        # if c == 3:
+        #     import matplotlib.pyplot as plt
+        #     Fig, axes = plt.subplots(nrows=1, ncols=2)
+
+        #     for axe, fig in zip(axes, [posmask, res[c]]):
+        #         im = axe.imshow(fig)
+        #     Fig.colorbar(im)
+        #     plt.show()
+
+    return res
+
+
+# Misc utils
+def save_images(segs: Tensor, names: Iterable[str], root: str, mode: str, iter: int) -> None:
+    b, w, h = segs.shape  # Since we have the class numbers, we do not need a C axis
+
+    for seg, name in zip(segs, names):
+        save_path = Path(root, f"iter{iter:03d}", mode, name).with_suffix(".png")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        imsave(str(save_path), seg.cpu().numpy())
+
+
+def augment(*arrs: Union[np.ndarray, Image.Image]) -> List[Image.Image]:
+    imgs: List[Image.Image] = map_(Image.fromarray, arrs) if isinstance(arrs[0], np.ndarray) else list(arrs)
+
+    if random() > 0.5:
+        imgs = map_(ImageOps.flip, imgs)
+    if random() > 0.5:
+        imgs = map_(ImageOps.mirror, imgs)
+    if random() > 0.5:
+        angle = random() * 90 - 45
+        imgs = map_(lambda e: e.rotate(angle), imgs)
+    return imgs
+
+
+def augment_arr(*arrs_a: np.ndarray) -> List[np.ndarray]:
+    arrs = list(arrs_a)  # manoucherie type check
+
+    if random() > 0.5:
+        arrs = map_(np.flip, arrs)
+    if random() > 0.5:
+        arrs = map_(np.fliplr, arrs)
+    # if random() > 0.5:
+    #     orig_shape = arrs[0].shape
+
+    #     angle = random() * 90 - 45
+    #     arrs = map_(lambda e: sp.ndimage.rotate(e, angle, order=1), arrs)
+
+    #     arrs = get_center(orig_shape, *arrs)
+
+    return arrs
+
+
+def get_center(shape: Tuple, *arrs: np.ndarray) -> List[np.ndarray]:
+    def g_center(arr):
+        if arr.shape == shape:
+            return arr
+
+        dx = (arr.shape[0] - shape[0]) // 2
+        dy = (arr.shape[1] - shape[1]) // 2
+
+        if dx == 0 or dy == 0:
+            return arr[:shape[0], :shape[1]]
+
+        res = arr[dx:-dx, dy:-dy][:shape[0], :shape[1]]  # Deal with off-by-one errors
+        assert res.shape == shape, (res.shape, shape, dx, dy)
+
+        return res
+
+    return [g_center(arr) for arr in arrs]

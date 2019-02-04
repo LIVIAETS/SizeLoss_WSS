@@ -1,14 +1,19 @@
-*_tmp
 data/
+results/
+inference/
+archives/
+
+
+*.zip
 *.pkl
 *.tar.gz
-FS/
-LOG/
-archives/
-GT/
-Img/
 plots
 Results/
+results
+*.npy
+plot_bounds/
+/*.png
+/**/RANDOM_DATA*
 
 .DS_Store
 
